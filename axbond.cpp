@@ -49,6 +49,8 @@ struct bufInfo {
 	unsigned short seq ;
 };
 
+int roundRobinLast=0 ;
+
 unsigned short toSeq = 0 ;
 unsigned short fromSeq = 0 ;
 
@@ -58,10 +60,22 @@ int readFromPipe(int fd, char *buf, unsigned int remaining, struct bufInfo *bi) 
 	ioctl(fd, FIONREAD, &availableToRead) ;
 
 	if( bi->weHasIt ) {
-		// TODO : need to check remaining!
+		// See if we have room for it:
+		if( remaining < bi->len ) {
+			return 0 ;
+		}
+
+		// Make sure its the sequence we're expecting:
+		if( bi->seq != fromSeq ) {
+			return 0 ;
+		}
+
 		if( availableToRead >= bi->len ) {
 			bi->weHasIt = 0 ;
-			return( read(fd, buf, remaining) ) ;
+
+			int nr = read(fd, buf, remaining) ;
+			fromSeq++ ;
+			return( nr ) ;
 		} else {
 			return(0) ;
 		}
@@ -140,6 +154,14 @@ int readFromStdin(int fd, char *buf, unsigned int remaining, struct bufInfo *bi)
 
 int writeToStdin(int fd, char *buf, unsigned int available, struct bufInfo *bi) {
 	return( write(fd, buf, available) ) ;
+}
+
+void updateRoundRobin() {
+	roundRobinLast++ ;
+}
+
+int walkOrder(int count, int max) {
+	return( (count + roundRobinLast) % max ) ;
 }
 
 int main(int argc, char *argv[]) {
@@ -309,7 +331,8 @@ int main(int argc, char *argv[]) {
 			continue ;
 		}
 
-		for(int i=0 ; i < numfds ; i++ ) {
+		for(int count=0 ; count < numfds ; count++ ) {
+			int i = walkOrder(count, numfds) ;
 
 			short int revents = fds[i].revents ;
 			if( revents & (POLLERR|POLLHUP) ) {
@@ -398,6 +421,7 @@ int main(int argc, char *argv[]) {
 				}
 			}
 		}
+		updateRoundRobin() ;
 	}
 
 
