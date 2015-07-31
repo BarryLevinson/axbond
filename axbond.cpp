@@ -24,8 +24,8 @@
 using namespace std;
 
 #define RBUF_SIZE  5 /*(1024*1024*10)*/
-#define STDIN_FDI 0
-#define STDOUT_FDI 1
+#define IN_FDI 0
+#define OUT_FDI 1
 #define MAX_CONNCECTIONS 8
 
 // Message types:
@@ -173,9 +173,12 @@ int main(int argc, char *argv[]) {
 	int numSIps = 0 ;
 	char isServer = 1 ;
 	int port = 0 ;
+	char *forwardHost = NULL ;
+	int forwardPort = 0 ;
+	char isForwardOpened = 0 ;
 
 	int opt ;
-	while( (opt= getopt(argc, argv, "s:c:p:")) != -1 ) {
+	while( (opt= getopt(argc, argv, "s:c:p:f:")) != -1 ) {
 		switch(opt) {
 		case 'p' :
 			port = atoi(optarg) ;
@@ -186,6 +189,23 @@ int main(int argc, char *argv[]) {
 		case 'c':
 			isServer = 0 ; // We're a client!
 			hostname = optarg ;
+			break ;
+		case 'f' :
+			char *colon ;
+			colon = strchr(optarg,':') ;
+			if( colon == NULL ) {
+				fprintf(stderr, usage) ;
+				exit(1) ;
+			}
+
+			forwardPort=atoi(colon+1) ;
+
+			int hostLen ;
+			hostLen = colon-optarg ;
+			forwardHost=(char *)malloc(hostLen+1) ;
+
+			strncpy(forwardHost, optarg, hostLen) ;
+			forwardHost[hostLen]='\0' ;
 			break ;
 		case '?' :
 			fprintf(stderr, usage) ;
@@ -212,7 +232,7 @@ int main(int argc, char *argv[]) {
 	toProxy.buf = (char *)malloc( RBUF_SIZE ) ;
 	toProxy.head = 0 ;
 	toProxy.tail = 0 ;
-	toProxy.read_fdi[0] = STDIN_FDI ;
+	toProxy.read_fdi[0] = IN_FDI ;
 	toProxy.num_read_connections = 1 ;
 	toProxy.num_write_connections = 0 ;
 
@@ -221,16 +241,16 @@ int main(int argc, char *argv[]) {
 	fromProxy.head = 0 ;
 	fromProxy.tail = 0 ;
 	fromProxy.num_read_connections = 0 ;
-	fromProxy.write_fdi[0] = STDOUT_FDI ;
+	fromProxy.write_fdi[0] = OUT_FDI ;
 	fromProxy.num_write_connections = 1 ;
 
 	int numfds = 2 ;
 	struct pollfd fds[MAX_CONNCECTIONS+2] ;
 
-	fds[STDIN_FDI].fd = STDIN_FILENO ;
-	fds[STDIN_FDI].events = POLLIN ;
-	fds[STDOUT_FDI].fd = STDOUT_FILENO ;
-	fds[STDOUT_FDI].events = 0 ;
+	fds[IN_FDI].fd = forwardHost ? -1 : STDIN_FILENO ;
+	fds[IN_FDI].events = POLLIN ;
+	fds[OUT_FDI].fd = forwardHost ? -1 : STDOUT_FILENO ;
+	fds[OUT_FDI].events = 0 ;
 
 	struct bufInfo bufInfos[MAX_CONNCECTIONS+2] ;
 	memset(bufInfos,0,sizeof(bufInfos)) ;
@@ -349,13 +369,50 @@ int main(int argc, char *argv[]) {
 				toProxy.write_fdi[toProxy.num_write_connections++] = numfds ;
 				fromProxy.read_fdi[fromProxy.num_read_connections++] = numfds ;
 				numfds++ ;
+
+				// If we are forwarding and this is the first accepted connection,
+				// then open our forwarding port:
+				if( forwardHost && !isForwardOpened ) {
+					isForwardOpened = 1 ;
+
+					int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+					if( sock < 0 ) {
+						perror("ERROR: could not open socket") ;
+						exit(1) ;
+					}
+
+					struct hostent *fhadd = gethostbyname(forwardHost) ;
+					if( fhadd == NULL ) {
+						fprintf(stderr, "unknown host %s", forwardHost);
+						exit(1) ;
+					}
+					struct sockaddr_in fip ;
+
+					fip.sin_family = AF_INET ;
+
+					// copy in address:
+					bcopy((char *)fhadd->h_addr, (char *)&fip.sin_addr.s_addr,fhadd->h_length) ;
+
+					// port:
+					fip.sin_port = htons(forwardPort) ;
+
+					if( connect(sock, (struct sockaddr *)&fip, sizeof(fip)) < 0 ) {
+						perror("ERROR: connect failed.") ;
+						exit(1) ;
+					}
+
+					fds[IN_FDI].fd = sock ;
+					fds[IN_FDI].events = POLLIN ;
+					fds[OUT_FDI].fd = sock ;
+					fds[OUT_FDI].events = POLLOUT ;
+				}
 				continue ;
 			}
 
 			if( revents & POLLIN ) {
 				int (*readFuncPtr)(int, char*, unsigned int, struct bufInfo*) ;
 				struct ppipe *pipe ;
-				if( STDIN_FDI == i ) {
+				if( IN_FDI == i ) {
 					pipe = &toProxy ;
 					readFuncPtr = &readFromStdin ;
 				} else {
@@ -389,7 +446,7 @@ int main(int argc, char *argv[]) {
 			if( revents & POLLOUT ) {
 				int (*writeFuncPtr)(int, char*, unsigned int, struct bufInfo*) ;
 				struct ppipe *pipe ;
-				if( STDOUT_FDI == i ) {
+				if( OUT_FDI == i ) {
 					pipe = &fromProxy ;
 					writeFuncPtr = &writeToStdin ;
 				} else {
