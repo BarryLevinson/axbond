@@ -13,6 +13,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,12 +50,38 @@ struct bufInfo {
 	unsigned short seq ;
 };
 
+typedef enum {
+	debug,
+	verbose,
+	info,
+	error
+} debugLevel ;
+
+debugLevel logLevel = info ;
+
 int roundRobinLast=0 ;
 
 unsigned short toSeq = 0 ;
 unsigned short fromSeq = 0 ;
 
+FILE *logfile = stderr ;
 
+int log(debugLevel l, const char *format, ...) {
+	if( l < logLevel ) {
+		return 0 ;
+	}
+
+	va_list arg ;
+	int done;
+
+	va_start(arg,format) ;
+	done = vfprintf(logfile,format,arg) ;
+	va_end(arg) ;
+
+	return( done ) ;
+}
+
+int tcount=0 ;
 int readFromPipe(int fd, char *buf, unsigned int remaining, struct bufInfo *bi) {
 	unsigned int availableToRead ;
 	ioctl(fd, FIONREAD, &availableToRead) ;
@@ -62,18 +89,20 @@ int readFromPipe(int fd, char *buf, unsigned int remaining, struct bufInfo *bi) 
 	if( bi->weHasIt ) {
 		// See if we have room for it:
 		if( remaining < bi->len ) {
+			log( debug, "no room : remaining : %ud, len : %u\n", remaining, bi->len ) ;
 			return 0 ;
 		}
 
 		// Make sure its the sequence we're expecting:
 		if( bi->seq != fromSeq ) {
+			log(debug, "oos : seq : %d != %d\n", bi->seq, fromSeq) ;
 			return 0 ;
 		}
 
 		if( availableToRead >= bi->len ) {
 			bi->weHasIt = 0 ;
 
-			int nr = read(fd, buf, remaining) ;
+			int nr = read(fd, buf, bi->len) ;
 			fromSeq++ ;
 			return( nr ) ;
 		} else {
@@ -90,6 +119,7 @@ int readFromPipe(int fd, char *buf, unsigned int remaining, struct bufInfo *bi) 
 			bi->msgType = (header >> (sizeof(short))) && 0xFF ;
 			bi->seq = header ;
 			bi->weHasIt = 1 ;
+			log(debug, "Got header : len : %d (0x%x), type : %d (0x%x) seq : %d (0x%x)\n", bi->len, bi->len, bi->msgType, bi->msgType, bi->seq, bi->seq) ;
 		}
 		return(0) ;
 	}
@@ -114,6 +144,7 @@ int writeToPipe(int fd, char *buf, unsigned int available, struct bufInfo *bi ) 
 
 	unsigned int len ;
 	if( sqleft <= (unsigned int)(sizeof(toSeq) + sizeof(len) + sizeof(msgType)) ) {
+		log(debug, "not enough room to write msg\n") ;
 		return 0 ;
 	}
 
@@ -122,6 +153,8 @@ int writeToPipe(int fd, char *buf, unsigned int available, struct bufInfo *bi ) 
 	if( available < len ) {
 		len = available ;
 	}
+
+	log(debug, "sqleft : %u, toSeq : %d, len : %d, available : %u\n", sqleft, toSeq, len, available ) ;
 
 	// pack the header into a long to save some space, yet still pad so we can read it back out easily.
 	long header = (long)len << (sizeof(int)*8) | msgType << (sizeof(short)*8) | toSeq ;
@@ -139,7 +172,7 @@ int writeToPipe(int fd, char *buf, unsigned int available, struct bufInfo *bi ) 
 	}
 
 	if( nw != (unsigned int) len ) {
-		fprintf(stderr, "Unexpected error writing to pipe (%d:%d).\n",nw, len) ;
+		log(error, "Unexpected error writing to pipe (%d:%d).\n",nw, len) ;
 		exit(1) ;
 	}
 
@@ -178,7 +211,7 @@ int main(int argc, char *argv[]) {
 	char isForwardOpened = 0 ;
 
 	int opt ;
-	while( (opt= getopt(argc, argv, "s:c:p:f:")) != -1 ) {
+	while( (opt= getopt(argc, argv, "s:c:p:f:d:l:")) != -1 ) {
 		switch(opt) {
 		case 'p' :
 			port = atoi(optarg) ;
@@ -206,6 +239,26 @@ int main(int argc, char *argv[]) {
 
 			strncpy(forwardHost, optarg, hostLen) ;
 			forwardHost[hostLen]='\0' ;
+			break ;
+		case 'd' :
+			if( strcasecmp( optarg, "debug") == 0 ) {
+				logLevel = debug ;
+			} else if( strcasecmp( optarg, "verbose") == 0 ) {
+				logLevel = verbose ;
+			} else if( strcasecmp( optarg, "info") == 0 ) {
+				logLevel = info ;
+			} else if( strcasecmp( optarg, "info") == 0 ) {
+				logLevel = error ;
+			} else {
+				fprintf(stderr, "Unknown debug level '%s'\n", optarg) ;
+				exit(1) ;
+			}
+			break ;
+		case 'l' :
+			if( (logfile = fopen(optarg, "a" )) == NULL ) {
+				fprintf(stderr, "Unable to open logfile : '%s'\n", optarg ) ;
+				exit(1) ;
+			}
 			break ;
 		case '?' :
 			fprintf(stderr, usage) ;
